@@ -1,0 +1,177 @@
+* Install
+** General
+** Distro Specific
+*** Debian 10
+Minimal node installation, make sure to: 
+- Configure static IP in =/etc/network/interfaces=
+- Configure domain and DNS in =/etc/resolv.conf=
+- Configure hostname in =/etc/hostname=
+- Add split DNS mapping in router
+
+Switch to iptables legacy mode
+#+BEGIN_SRC sh
+  sudo update-alternatives --set iptables /usr/sbin/iptables-legacy
+  sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+  sudo update-alternatives --set arptables /usr/sbin/arptables-legacy
+  sudo update-alternatives --set ebtables /usr/sbin/ebtables-legacy
+#+END_SRC
+
+Install Docker
+#+BEGIN_SRC sh
+  apt install apt-transport-https ca-certificates curl gnupg2
+  curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+  add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian buster stable"
+  apt update
+  apt install docker-ce
+#+END_SRC
+
+Install kubernetes, here locked to 0.17. List versions with =apt list -a kubelet=.
+#+BEGIN_SRC sh
+  curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+  apt-add-repository "deb [arch=amd64] http://apt.kubernetes.io/ kubernetes-xenial main"
+  apt update
+  apt install kubelet=1.17.4-00 kubeadm=1.17.4-00 kubectl=1.17.4-00
+  apt-mark hold kubelet kubeadm kubectl
+#+END_SRC
+
+Configure iptables to correctly see bridged traffic
+#+BEGIN_SRC sh
+cat <<EOF > /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+EOF
+/sbin/sysctl --system
+#+END_SRC
+
+Set docker daemon driver to =systemd=
+#+BEGIN_SRC sh
+  cat <<EOF > /etc/docker/daemon.json
+  {
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+  "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+  }
+  EOF
+#+END_SRC
+* Configuration
+** Local Network
+Make sure your subnet isn't one of the defaults like =10.0.0.0/24= or
+=192.168.0.0/24=. Use a random =/16= in the =10.0.0.0= block, like
+=10.123.0.0/16=. Otherwise, you'll have issues VPNing into other
+networks that use the same subnet, because local IPs will conflict
+with remote IPs.
+** Cluster Bootstrap
+*** TODO Set up HAProxy
+*** Bootstrap with Kubeadm
+- [[https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/high-availability/][Bootstraping a HA Cluster with kubeadm]]
+
+On the first master node, bootstrap the cluster using the HAProxy
+domain name we just created as the control plane endpoint.
+
+Depending on the CNI plugin you use, you may need to set the pod
+network CIDR to a certain value (make sure it doesn't conflict with
+your local subnet). The one below works for Cilium, but check the [[https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/create-cluster-kubeadm/#pod-network][CNI
+install docs]] for everything you need to install another one.
+
+#+BEGIN_SRC shell
+kubeadm init --control-plane-endpoint=kube.i.foltz.io --pod-network-cidr=10.217.0.0/16 --upload-certs
+#+END_SRC
+
+Once the first master is set up, it will spit out a bunch of useful
+info you will need.
+
+The admin.conf it generated stores certificate and authentication
+information for your cluster to communicate. You can copy it to your
+local workstation and entirely remote control the cluster without
+needing to ssh in and run kubectl commands manually on the master
+node.
+
+The =kubeadm join= command it generates (the one for masters with
+=--control-plane-endpoint=) has the key to the secret that will allow
+kubeadm to automatically distribute the generated CA certificates to
+new nodes. They'll automatically get removed in 2 hours, so you may
+need to do some other tomfoolery to join another node after that. Run
+this command to join every other master node to the cluster.
+
+Once this is done, untaint the master role to allow pods to be
+scheduled on masters, which you'll need if your cluster is made of
+only masters. Technically in production you're discouraged from
+running pods on masters at all, let alone having your entire working
+cluster made of masters, but ehhh we're not google.
+
+#+BEGIN_SRC shell
+kubectl taint nodes --all node-role.kubernetes.io/master-
+#+END_SRC
+** Cilium
+Once the cluster is set up, we can get to installing the CNI, the
+black magic networking glue between nodes and pods.
+
+Install Cillium and connectivity test
+#+BEGIN_SRC 
+kubectl create -f https://raw.githubusercontent.com/cilium/cilium/v1.7/install/kubernetes/quick-install.yaml
+kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
+#+END_SRC
+
+If external-fqdn 
+** MetalLB
+Make sure BGP advertisement isn't part of the routable subnet
+
+Deploy MetalLB
+#+BEGIN_SRC 
+kubectl apply -f https://raw.githubusercontent.com/google/metallb/v0.9.3/manifests/namespace.yaml
+kubectl apply -f https://raw.githubusercontent.com/google/metallb/v0.9.3/manifests/metallb.yaml
+kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$(openssl rand -base64 128)"
+#+END_SRC
+
+Create MetalLB config.yml
+#+BEGIN_SRC yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    peers:
+    - peer-address: 10.16.0.1
+      peer-asn: 64500
+      my-asn: 64501
+    address-pools:
+    - name: default
+      avoid-buggy-ips: true
+      protocol: bgp
+      addresses:
+      - 10.16.64.0/18
+#+END_SRC
+
+Apply config
+#+BEGIN_SRC
+kubectl apply -f metallb.yml
+#+END_SRC
+** Rook Storage
+** Istio Ingress
+** Dashboard
+** Hubble
+#+BEGIN_SRC
+git clone https://github.com/cilium/hubble.git
+cd hubble/install/kubernetes
+
+helm template hubble \
+    --namespace kube-system \
+    --set metrics.enabled="{dns,drop,tcp,flow,port-distribution,icmp,http}" \
+    --set ui.enabled=true \
+> hubble.yml
+kubectl apply -f hubble.yml
+#+END_SRC
+* Notes
+** OPNsense
+*** Unbound
+**** Local Zone Type
+If you don't want unknown hostnames to resolve to the router's IP,
+change the Local Zone Type from =transient= to =static=. For some
+reason, =transient= caused issues resolving external FQDNs from within
+pods with cilium for me (Foltik).
+* Troubleshooting
