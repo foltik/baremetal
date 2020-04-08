@@ -241,8 +241,9 @@ curl -v -k -HHost:test.foltz.io --resolve test.foltz.io:80:10.17.0.1 https://tes
 #+END_SRC
 **** Deploy level TLS with Mounts
 You can also just mount the certificate secret directly into a
-Deployment with a secret file mount. Note that in this case, the
-secret has to be in the same namespace as the deployment.
+Deployment with a secret file mount, and use TLS passthrough on the
+gateway to talk directly to a TLS secured backend. Note that in this
+case, the secret has to be in the same namespace as the deployment.
 
 See [[./configs/examples/tls/cert.yaml][cert.yaml]] and [[./configs/examples/tls/app.yaml][app.yaml]] for an example of how to do this.
 *** Kiali
