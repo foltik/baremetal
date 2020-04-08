@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-nginx
+spec:
+  selector:
+    matchLabels:
+      run: test-nginx
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        run: test-nginx
+    spec:
+      containers:
+      - name: test-nginx
+        image: nginx
+        ports:
+        - containerPort: 443
+        volumeMounts:
+        - name: test-nginx-config
+          mountPath: /etc/nginx
+          readOnly: true
+        - name: test-nginx-cert
+          mountPath: /etc/nginx-server-certs
+          readOnly: true
+      volumes:
+      - name: test-nginx-config
+        configMap:
+          name: test-nginx-configmap
+      - name: test-nginx-cert
+        secret:
+          secretName: test-nginx-cert
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-nginx-configmap
+data:
+  nginx.conf: |
+    events {
+    }
+
+    http {
+      log_format main '$remote_addr - $remote_user [$time_local]  $status '
+      '"$request" $body_bytes_sent "$http_referer" '
+      '"$http_user_agent" "$http_x_forwarded_for"';
+      access_log /var/log/nginx/access.log main;
+      error_log  /var/log/nginx/error.log;
+
+      server {
+        listen 443 ssl;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        server_name nginx.example.com;
+        ssl_certificate /etc/nginx-server-certs/tls.crt;
+        ssl_certificate_key /etc/nginx-server-certs/tls.key;
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-nginx
+  labels:
+    run: test-nginx
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+  selector:
+    run: test-nginx
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: test-nginx
+spec:
+  hosts:
+  - test.foltz.io
+  gateways:
+  - test-nginx-gateway
+  tls:
+  - match:
+    - port: 443
+      sni_hosts:
+      - test.foltz.io
+    route:
+    - destination:
+        host: test-nginx
+        port:
+          number: 443
+  # Required for httpsRedirect to work for some reason
+  http: 
+  - match:
+    - uri:
+        prefix: '/'
+    route:
+    - destination:
+        host: test-nginx
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: test-nginx-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - test.foltz.io
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - test.foltz.io
+    tls:
+      mode: PASSTHROUGH

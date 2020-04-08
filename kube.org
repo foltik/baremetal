@@ -8,17 +8,17 @@ Minimal node installation, make sure to:
 - Configure hostname in =/etc/hostname=
 - Add split DNS mapping in router
 
-Switch to iptables legacy mode
+Install =ebtables= and =arptables=, and switch to iptables legacy mode
 #+BEGIN_SRC sh
-  sudo update-alternatives --set iptables /usr/sbin/iptables-legacy
-  sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
-  sudo update-alternatives --set arptables /usr/sbin/arptables-legacy
-  sudo update-alternatives --set ebtables /usr/sbin/ebtables-legacy
+  update-alternatives --set iptables /usr/sbin/iptables-legacy
+  update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+  update-alternatives --set arptables /usr/sbin/arptables-legacy
+  update-alternatives --set ebtables /usr/sbin/ebtables-legacy
 #+END_SRC
 
 Install Docker
 #+BEGIN_SRC sh
-  apt install apt-transport-https ca-certificates curl gnupg2
+  apt install apt-transport-https ca-certificates software-properties-common curl gnupg2
   curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
   add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian buster stable"
   apt update
@@ -40,7 +40,7 @@ cat <<EOF > /etc/sysctl.d/k8s.conf
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
 EOF
-/sbin/sysctl --system
+sysctl --system
 #+END_SRC
 
 Set docker daemon driver to =systemd=
@@ -55,6 +55,8 @@ Set docker daemon driver to =systemd=
   "storage-driver": "overlay2"
   }
   EOF
+
+  systemctl restart docker
 #+END_SRC
 * Configuration
 ** Local Network
@@ -115,6 +117,11 @@ kubectl create -f https://raw.githubusercontent.com/cilium/cilium/v1.7/install/k
 kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
 #+END_SRC
 
+Delete connectivity test after
+#+BEGIN_SRC shell
+kubectl delete -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
+#+END_SRC
+
 If external-fqdn 
 ** MetalLB
 Make sure BGP advertisement isn't part of the routable subnet
@@ -151,8 +158,117 @@ Apply config
 #+BEGIN_SRC
 kubectl apply -f metallb.yml
 #+END_SRC
+** Istio
+*** TLS
+Install cert-manager https://cert-manager.io/docs/installation/kubernetes/
+
+#+BEGIN_SRC shell
+kubectl apply -f https://github.com/jetstack/cert-manager/releases/download/v0.14.1/cert-manager.crds.yaml
+kubectl create namespace cert-manager
+helm repo add jetstack https://charts.jetstack.io
+helm repo update
+helm install \
+  cert-manager jetstack/cert-manager \
+  --namespace ingress \
+  --version v0.14.1
+  --set 'extraArgs={--dns01-recursive-nameservers=1.1.1.1:53\,1.0.0.1:53}'
+k apply -f cloudflare.yaml -n cert-manager
+#+END_SRC
+
+Create a cluster issuer. Start with staging so you can test issuing,
+but later make a new one called letsencrypt and swap out the URL for
+the live URL.
+#+BEGIN_SRC yaml
+  apiVersion: cert-manager.io/v1alpha2
+  kind: ClusterIssuer
+  metadata:
+    name: letsencrypt-staging
+    namespace: cert-manager
+  spec:
+    acme:
+      email: user@example.com
+      server: https://acme-staging-v02.api.letsencrypt.org/directory
+      privateKeySecretRef:
+        # Secret that will be created to store the letsencrypt account private key
+        name: letsencrypt-key
+    solvers:
+    - dns01:
+      cloudflare:
+        # Cloudflare email
+        email: user@example.com
+        apiTokenSecretRef:
+          # Secret storing cloudflare API token
+          name: cloudflare-key
+          key: apikey
+    selector:
+      dnsZones:
+      # Your domain. This will match example.com and *.example.com
+      - 'example.com'
+#+END_SRC
+
+Create the secrets. Make sure to use a scoped api TOKEN, not the
+global API KEY.
+
+#+BEGIN_SRC yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-key
+  namespace: cert-manager
+type: Opaque
+string:
+  apikey: # Your API token base64 encoded
+#+END_SRC
+
+See [[./configs/examples/tls][configs/examples/tls]] for examples:
+**** Gateway level TLS with SDS
+In order for the ingressgateway to pick up the secret via Secret
+Discovery Service, the certificate needs to be in the =istio-system=
+namespace. It looks like this [[https://github.com/istio/istio/issues/14598][is going to change]], hopefully.
+
+Modify and deploy [[./configs/examples/tls/cert-system.yaml][cert-system.yaml]], and wait for the ACME challenge to complete.
+You can see the status with:
+
+#+BEGIN_SRC shell
+kubectl get certificate test-nginx-cert -n istio-system
+#+END_SRC
+
+Once it's successfully issued, deploy [[./configs/examples/tls/app-http.yaml][app-http.yaml]]. Using your own
+domain and LoadBalancerIP, you should be able to get a response with:
+
+#+BEGIN_SRC shell
+curl -v -k -HHost:test.foltz.io --resolve test.foltz.io:80:10.17.0.1 https://test.foltz.io
+#+END_SRC
+**** Deploy level TLS with Mounts
+You can also just mount the certificate secret directly into a
+Deployment with a secret file mount. Note that in this case, the
+secret has to be in the same namespace as the deployment.
+
+See [[./configs/examples/tls/cert.yaml][cert.yaml]] and [[./configs/examples/tls/app.yaml][app.yaml]] for an example of how to do this.
+*** Kiali
+#+BEGIN_SRC shell
+cat <<EOF > kiali_secret.yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kiali
+  namespace: istio-system
+  labels:
+    app: kiali
+type: Opaque
+data:
+  username: $(read '?Kiali Username: ' uval && echo -n $uval | base64)
+  passphrase: $(read -s "?Kiali Passphrase: " pval && echo -n $pval | base64)
+#+END_SRC 
+*** Multiple Ingress Gateways
+https://github.com/istio/istio/issues/19263
+*** DNS
+While it's possible to automatically create/delete external DNS
+records with [[https://github.com/kubernetes-sigs/external-dns][external-dns]], including istio ingress gateways as a
+source, it picks up the LoadBalancerIP. Since we don't have a ton of
+public IPv4s to hand out and we use BGP peered RFC1918 addresses
+instead, this makes it kind of useless.
 ** Rook Storage
-** Istio Ingress
 ** Dashboard
 ** Hubble
 #+BEGIN_SRC
@@ -166,6 +282,36 @@ helm template hubble \
 > hubble.yml
 kubectl apply -f hubble.yml
 #+END_SRC
+** Deploying Services
+* X-Treme Automagic Configuration
+** Install
+#+BEGIN_SRC shell
+kubeadm init --control-plane-endpoint=kube.i.foltz.io --pod-network-cidr=10.217.0.0/16 --upload-certs
+kubeadm join ...
+scp root@obelisk:/etc/kubernetes/admin.conf ~/.kube/config
+kubectl taint nodes --all node-role.kubernetes.io/master-
+kubectl create -f https://raw.githubusercontent.com/cilium/cilium/v1.7/install/kubernetes/quick-install.yaml
+kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
+kubectl delete -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
+kubectl apply -f https://raw.githubusercontent.com/google/metallb/v0.9.3/manifests/namespace.yaml
+kubectl apply -f https://raw.githubusercontent.com/google/metallb/v0.9.3/manifests/metallb.yaml
+kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey=(echo \"(openssl rand -base64 4)\")
+kubectl apply -f metallb.yaml
+istioctl manifest apply -f istio-config.yaml
+kubectl label namespace default istio-injection=enabled
+#+END_SRC
+** Reset
+#+BEGIN_SRC shell
+kubeadm reset
+rm -rf /etc/cni/net.d/* ~/.kube/ /etc/kubernetes/ /var/lib/cni/ /opt/cni/ /var/lib/etcd
+sudo iptables -F && sudo iptables -t nat -F && sudo iptables -t mangle -F && sudo iptables -X
+systemctl daemon-reload
+systemctl restart kubelet
+#+END_SRC
+* Deep Dive
+** Networking
+https://www.stackrox.com/post/2020/01/kubernetes-networking-demystified/
+https://itnext.io/kubernetes-network-deep-dive-7492341e0ab5
 * Notes
 ** OPNsense
 *** Unbound
