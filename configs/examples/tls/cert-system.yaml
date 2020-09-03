@@ -9,4 +9,4 @@ spec:
     name: letsencrypt-staging
     kind: ClusterIssuer
   dnsNames:
-  - test.foltz.io
+  - test.i.foltz.io

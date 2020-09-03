@@ -85,7 +85,7 @@ spec:
   tls:
   - match:
     - port: 443
-      sni_hosts:
+      sniHosts:
       - test.foltz.io
     route:
     - destination:
@@ -107,7 +107,7 @@ metadata:
   name: test-nginx-gateway
 spec:
   selector:
-    istio: ingressgateway
+    tier: external
   servers:
   - port:
       number: 80

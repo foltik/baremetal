@@ -16,7 +16,7 @@ spec:
       - name: test-nginx
         image: nginx
         ports:
-        - containerPort: 80
+        - containerPort: 8080
         volumeMounts:
         - name: test-nginx-config
           mountPath: /etc/nginx
@@ -49,12 +49,10 @@ data:
       error_log  /var/log/nginx/error.log;
 
       server {
-        listen 80;
+        listen 8080;
 
         root /usr/share/nginx/html;
         index index.html;
-
-        server_name test.foltz.io;
       }
     }
 ---
@@ -66,7 +64,7 @@ metadata:
     run: test-nginx
 spec:
   ports:
-  - port: 80
+  - port: 8080
     protocol: TCP
   selector:
     run: test-nginx
@@ -77,9 +75,9 @@ metadata:
   name: test-nginx
 spec:
   hosts:
-  - test.foltz.io
+  - test.i.foltz.io
   gateways:
-  - test-nginx-gateway
+  - test-nginx
   http:
   - match:
     - uri:
@@ -87,23 +85,23 @@ spec:
     route:
     - destination:
         port:
-          number: 80
+          number: 8080
         host: test-nginx
 ---
 apiVersion: networking.istio.io/v1alpha3
 kind: Gateway
 metadata:
-  name: test-nginx-gateway
+  name: test-nginx
 spec:
   selector:
-    istio: ingressgateway
+    tier: internal
   servers:
   - port:
       number: 80
       name: http
       protocol: HTTP
     hosts:
-    - test.foltz.io
+    - test.i.foltz.io
     tls:
       httpsRedirect: true
   - port:
@@ -111,7 +109,7 @@ spec:
       name: https
       protocol: HTTPS
     hosts:
-    - test.foltz.io
+    - test.i.foltz.io
     tls:
       mode: SIMPLE
       credentialName: test-nginx-cert
