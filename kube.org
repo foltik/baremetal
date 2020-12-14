@@ -30,12 +30,12 @@ Install Docker
   apt install docker-ce
 #+END_SRC
 
-Install kubernetes, here locked to 0.17. List versions with =apt list -a kubelet=.
+Install kubernetes, here locked to 20.0. List versions with =apt list -a kubelet=.
 #+BEGIN_SRC sh
   curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
   apt-add-repository "deb [arch=amd64] http://apt.kubernetes.io/ kubernetes-xenial main"
   apt update
-  apt install kubelet=1.17.4-00 kubeadm=1.17.4-00 kubectl=1.17.4-00
+  apt install kubelet=1.20.0-00 kubeadm=1.20.4-00 kubectl=1.20.0-00
   apt-mark hold kubelet kubeadm kubectl
 #+END_SRC
 
@@ -63,6 +63,7 @@ Set docker daemon driver to =systemd=
 
   systemctl restart docker
 #+END_SRC
+*
 * Configuration
 ** Local Network
 Make sure your subnet isn't one of the defaults like =10.0.0.0/24= or
@@ -72,6 +73,40 @@ networks that use the same subnet, because local IPs will conflict
 with remote IPs.
 ** Cluster Bootstrap
 *** TODO Set up HAProxy
+The main important issue is to do TCP forwarding and not HTTP. Here a stat
+page is enabled as well for those running a vanilla HAproxy.
+#+BEGIN_SRC shell
+listen stats
+  bind    *:9000
+  mode    http
+  stats   enable
+  stats   hide-version
+  stats   uri       /stats
+  stats   refresh   30s
+  stats   realm     Haproxy\ Statistics
+  stats   auth      Admin:Password
+
+############## Configure HAProxy Secure Frontend #############
+frontend k8s-api-https-proxy
+    bind :443
+    mode tcp
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req.ssl_hello_type 1 }
+    default_backend k8s-api-https
+
+############## Configure HAProxy SecureBackend #############
+backend k8s-api-https
+    balance roundrobin
+    mode tcp
+    option tcplog
+    option tcp-check
+    default-server inter 10s downinter 5s rise 2 fall 2 slowstart 60s maxconn 250 maxqueue 256 weight 100
+    server k8s-api-1 192.168.1.101:6443 check
+    server k8s-api-2 192.168.1.102:6443 check
+    server k8s-api-3 192.168.1.103:6443 check
+
+
+#+END_SRC
 *** Bootstrap with Kubeadm
 - [[https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/high-availability/][Bootstraping a HA Cluster with kubeadm]]
 
@@ -118,13 +153,13 @@ black magic networking glue between nodes and pods.
 
 Install Cillium and connectivity test
 #+BEGIN_SRC 
-kubectl create -f https://raw.githubusercontent.com/cilium/cilium/v1.7/install/kubernetes/quick-install.yaml
-kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
+kubectl create -f https://raw.githubusercontent.com/cilium/cilium/v1.9/install/kubernetes/quick-install.yaml
+kubectl apply -f https://raw.githubusercontent.com/cilium/cilium/v1.9/examples/kubernetes/connectivity-check/connectivity-check.yaml
 #+END_SRC
 
 Delete connectivity test after
 #+BEGIN_SRC shell
-kubectl delete -f https://raw.githubusercontent.com/cilium/cilium/v1.7/examples/kubernetes/connectivity-check/connectivity-check.yaml
+kubectl delete -f https://raw.githubusercontent.com/cilium/cilium/v1.9/examples/kubernetes/connectivity-check/connectivity-check.yaml
 #+END_SRC
 
 If external-fqdn 
@@ -317,6 +352,9 @@ PVC access modes explanation
 https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes
 ** Dashboard
 ** Hubble
+
+TODO: The below is irrelevant for Cilium =>1.18, it comes included in a
+quick.yaml file
 #+BEGIN_SRC
 git clone https://github.com/cilium/hubble.git
 cd hubble/install/kubernetes
@@ -343,6 +381,7 @@ helm install -f hydra-config.yaml ory/hydra
 helm install
 #+END_SRC
 * X-Treme Automagic Configuration
+AKA foltz's unportable installation shell script
 ** Install
 #+BEGIN_SRC shell
 kubeadm init --control-plane-endpoint=kube.i.foltz.io --pod-network-cidr=10.217.0.0/16 --upload-certs
